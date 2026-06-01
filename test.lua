@@ -2135,10 +2135,15 @@ local _flyAnimCache = {}
                     (flyKeys.S  and 1 or 0)-(flyKeys.W    and 1 or 0))
             end
 
-            if localMove.Magnitude > 0.01 then
+           if localMove.Magnitude > 0.01 then
                 local spd = flyGetSpeed()
-                local mv  = camCF:VectorToWorldSpace(localMove)
-                mv = mv.Unit * spd
+                local mv
+                if mobile then
+                    -- mobileFlyVector is already world-space; skip the camera transform
+                    mv = localMove.Unit * spd
+                else
+                    mv = (camCF:VectorToWorldSpace(localMove)).Unit * spd
+                end
                 pcall(function() bv.Velocity = mv end)
 
                 local newAnimState
@@ -2696,11 +2701,13 @@ if mobile then
             UserInputService.InputChanged:Connect(function(inp)
                 if dragging and inp.UserInputType==Enum.UserInputType.Touch then
                     local d=Vector2.new(inp.Position.X,inp.Position.Y)-dragOrigin
-                    if d.Magnitude>8 then moved=true end
-                    local vp2=Camera and Camera.ViewportSize or Vector2.new(800,600)
-                    flyFloat.Position=UDim2.fromOffset(
-                        math.clamp(frameOrig.X+d.X,0,vp2.X-74),
-                        math.clamp(frameOrig.Y+d.Y,0,vp2.Y-74))
+                    if d.Magnitude>12 then moved=true end
+                    if moved then  -- guard: only reposition on intentional drag
+                        local vp2=Camera and Camera.ViewportSize or Vector2.new(800,600)
+                        flyFloat.Position=UDim2.fromOffset(
+                            math.clamp(frameOrig.X+d.X,0,vp2.X-74),
+                            math.clamp(frameOrig.Y+d.Y,0,vp2.Y-74))
+                    end
                 end
             end)
             UserInputService.InputEnded:Connect(function(inp)
@@ -2767,8 +2774,11 @@ if mobile then
                     if flat.Magnitude>0.01 then flat=flat.Unit end
                     local right=Vector3.new(camCF.RightVector.X,0,camCF.RightVector.Z)
                     if right.Magnitude>0.01 then right=right.Unit end
-                    local crm=flat*(-moveDir.Z)+right*moveDir.X
-                    mobileFlyVector=Vector3.new(crm.X,camCF.LookVector.Y,crm.Z)
+                    -- Dot products correctly project world movement onto camera axes
+                local fwd=moveDir:Dot(flat)
+                local rt=moveDir:Dot(right)
+                local crm=flat*fwd+right*rt
+                mobileFlyVector=Vector3.new(crm.X,camCF.LookVector.Y,crm.Z)
                 else
                     mobileFlyVector=Vector3.zero
                 end
@@ -2777,7 +2787,224 @@ if mobile then
 
        -- Thumbstick hook started/stopped by fly toggle, not at load time
         _G.hookMobileThumbstick   = hookMobileThumbstick
-        -- Float button is NOT built here — it appears only when toggle is turned ON
+    end
+
+    -- Mobile standalone sweep overlay
+    do
+        local MOV={W=182,TITLE=26,ROW_H=26}
+        local mobOvGui=nil; local mobOvFrame=nil; local mobOvCountLbl=nil
+        local mobOvConn=nil; local mobOvPos=nil
+
+        local function mobOvDestroy()
+            if mobOvConn then mobOvConn:Disconnect(); mobOvConn=nil end
+            local pg=LocalPlayer:FindFirstChild("PlayerGui")
+            if pg then for _,v in ipairs(pg:GetChildren()) do
+                if v.Name=="GojoMobStandalone" then pcall(function() v:Destroy() end) end
+            end end
+            mobOvGui=nil; mobOvFrame=nil; mobOvCountLbl=nil
+        end
+
+        local function mobOvRebuild()
+            if not mobOvFrame or not mobOvFrame.Parent then return end
+            local scroll=mobOvFrame:FindFirstChild("MobOvScroll"); if not scroll then return end
+            for _,ch in ipairs(scroll:GetChildren()) do
+                if ch:IsA("Frame") then pcall(function() ch:Destroy() end) end
+            end
+            local myHRP=LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+            local targets=myHRP and getValidTargets(myHRP) or {}
+            local pc=0
+            for _,t in ipairs(targets) do if Players:FindFirstChild(t.name) then pc=pc+1 end end
+            if mobOvCountLbl then mobOvCountLbl.Text="#"..#targets.."  ("..pc.."P)" end
+            for i,tgt in ipairs(targets) do
+                local n=tgt.name
+                local isP=Players:FindFirstChild(n)~=nil
+                local isWL=St.whitelist[n]~=nil
+                local hp=0
+                if tgt.Humanoid and tgt.Humanoid.MaxHealth and tgt.Humanoid.MaxHealth>0 then
+                    hp=math.floor(tgt.Humanoid.Health/tgt.Humanoid.MaxHealth*100)
+                end
+                local rf=Instance.new("Frame")
+                rf.Size=UDim2.new(1,-4,0,MOV.ROW_H-2)
+                rf.BackgroundColor3=isWL and Color3.fromRGB(24,24,4)
+                    or (isP and Color3.fromRGB(12,4,4) or Color3.fromRGB(4,10,4))
+                rf.BorderSizePixel=0; rf.LayoutOrder=i; rf.ZIndex=3; rf.Parent=scroll
+                Instance.new("UICorner",rf).CornerRadius=UDim.new(0,5)
+                makeStroke(rf, isWL and Color3.fromRGB(160,160,30)
+                    or (isP and Color3.fromRGB(80,120,255) or Color3.fromRGB(60,180,60)), 1, 0.6)
+                local nb=Instance.new("TextButton")
+                nb.Size=UDim2.new(1,0,1,0); nb.Position=UDim2.new(0,4,0,0)
+                nb.BackgroundTransparency=1
+                nb.Text=(isP and "[P] " or "[N] ")..n.." "..hp.."%"..(isWL and " ✓" or "")
+                nb.TextColor3=isWL and Color3.fromRGB(200,200,60) or Color3.fromRGB(230,200,200)
+                nb.TextSize=8; nb.Font=Enum.Font.GothamBold
+                nb.TextXAlignment=Enum.TextXAlignment.Left; nb.ZIndex=4; nb.Parent=rf
+                local cn=n
+                nb.InputBegan:Connect(function(inp)
+                    if inp.UserInputType==Enum.UserInputType.Touch then
+                        if St.whitelist[cn] then St.whitelist[cn]=nil; notify("Whitelist","Removed: "..cn,2)
+                        else St.whitelist[cn]=true; notify("Whitelist","Added: "..cn,2) end
+                    end
+                end)
+            end
+        end
+
+        local function mobOvBuild()
+            mobOvDestroy()
+            local vp=Camera and Camera.ViewportSize or Vector2.new(800,600)
+            local cx=math.clamp(mobOvPos and mobOvPos.X or vp.X-MOV.W-8,0,vp.X-MOV.W-4)
+            local cy=math.clamp(mobOvPos and mobOvPos.Y or 80,0,vp.Y-100)
+            mobOvGui=Instance.new("ScreenGui")
+            mobOvGui.Name="GojoMobStandalone"; mobOvGui.ResetOnSpawn=false
+            mobOvGui.DisplayOrder=1001; mobOvGui.IgnoreGuiInset=true
+            mobOvGui.ZIndexBehavior=Enum.ZIndexBehavior.Sibling
+            mobOvGui.Parent=LocalPlayer:WaitForChild("PlayerGui")
+            mobOvFrame=Instance.new("Frame")
+            mobOvFrame.Size=UDim2.fromOffset(MOV.W,80); mobOvFrame.Position=UDim2.fromOffset(cx,cy)
+            mobOvFrame.BackgroundColor3=Color3.fromRGB(10,4,4); mobOvFrame.BorderSizePixel=0
+            mobOvFrame.ClipsDescendants=true; mobOvFrame.Active=true; mobOvFrame.Parent=mobOvGui
+            Instance.new("UICorner",mobOvFrame).CornerRadius=UDim.new(0,10)
+            makeStroke(mobOvFrame,Color3.fromRGB(160,10,10),1.5,0.2)
+            local titleBar=Instance.new("Frame")
+            titleBar.Size=UDim2.new(1,0,0,MOV.TITLE); titleBar.BackgroundColor3=Color3.fromRGB(18,5,5)
+            titleBar.BorderSizePixel=0; titleBar.ZIndex=2; titleBar.Active=true; titleBar.Parent=mobOvFrame
+            mobOvCountLbl=Instance.new("TextLabel")
+            mobOvCountLbl.Size=UDim2.new(1,-6,1,0); mobOvCountLbl.Position=UDim2.new(0,6,0,0)
+            mobOvCountLbl.BackgroundTransparency=1; mobOvCountLbl.Text="#0  (0P)"
+            mobOvCountLbl.TextColor3=Color3.fromRGB(200,20,20); mobOvCountLbl.TextSize=10
+            mobOvCountLbl.Font=Enum.Font.GothamBold; mobOvCountLbl.TextXAlignment=Enum.TextXAlignment.Left
+            mobOvCountLbl.ZIndex=3; mobOvCountLbl.Parent=titleBar
+            local ovDrg=false; local ovDragOr=Vector2.zero; local ovFrOr=Vector2.zero
+            titleBar.InputBegan:Connect(function(inp)
+                if inp.UserInputType==Enum.UserInputType.Touch then
+                    ovDrg=true; ovDragOr=Vector2.new(inp.Position.X,inp.Position.Y)
+                    ovFrOr=Vector2.new(mobOvFrame.Position.X.Offset,mobOvFrame.Position.Y.Offset)
+                end
+            end)
+            UserInputService.InputChanged:Connect(function(inp)
+                if ovDrg and mobOvFrame and inp.UserInputType==Enum.UserInputType.Touch then
+                    local d=Vector2.new(inp.Position.X,inp.Position.Y)-ovDragOr
+                    local vp2=Camera and Camera.ViewportSize or Vector2.new(800,600)
+                    mobOvFrame.Position=UDim2.fromOffset(
+                        math.clamp(ovFrOr.X+d.X,0,math.max(0,vp2.X-MOV.W-4)),
+                        math.clamp(ovFrOr.Y+d.Y,0,math.max(0,vp2.Y-40)))
+                    mobOvPos=Vector2.new(mobOvFrame.Position.X.Offset,mobOvFrame.Position.Y.Offset)
+                end
+            end)
+            UserInputService.InputEnded:Connect(function(inp)
+                if inp.UserInputType==Enum.UserInputType.Touch then ovDrg=false end
+            end)
+            local scroll=Instance.new("ScrollingFrame")
+            scroll.Name="MobOvScroll"; scroll.Size=UDim2.new(1,-4,1,-MOV.TITLE-2)
+            scroll.Position=UDim2.new(0,2,0,MOV.TITLE+1); scroll.BackgroundTransparency=1
+            scroll.ScrollBarThickness=2; scroll.ScrollBarImageColor3=Color3.fromRGB(160,10,10)
+            scroll.BorderSizePixel=0; scroll.ScrollingDirection=Enum.ScrollingDirection.Y
+            scroll.ZIndex=2; scroll.Parent=mobOvFrame
+            local rl=Instance.new("UIListLayout")
+            rl.Padding=UDim.new(0,2); rl.SortOrder=Enum.SortOrder.LayoutOrder; rl.Parent=scroll
+            rl:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+                local ch=rl.AbsoluteContentSize.Y+4
+                scroll.CanvasSize=UDim2.fromOffset(0,ch)
+                local vp3=Camera and Camera.ViewportSize or Vector2.new(800,600)
+                local maxH=vp3.Y-mobOvFrame.AbsolutePosition.Y-20
+                mobOvFrame.Size=UDim2.fromOffset(MOV.W,math.max(math.min(MOV.TITLE+ch+6,maxH),MOV.TITLE+28))
+            end)
+            local _lr=0
+            mobOvConn=RunService.Heartbeat:Connect(function()
+                local now=tick(); if now-_lr<1.0 then return end; _lr=now; mobOvRebuild()
+            end)
+            mobOvRebuild()
+        end
+
+        _G.buildMobileStandaloneOverlay   = mobOvBuild
+        _G.destroyMobileStandaloneOverlay = mobOvDestroy
+    end
+
+-- Lock-on float button
+    do
+        local loGui=nil; local loFloat=nil; local loStroke=nil; local loLbl=nil
+
+        local function destroyLockOnFloatButton()
+            if loGui and loGui.Parent then pcall(function() loGui:Destroy() end) end
+            loGui=nil; loFloat=nil; loStroke=nil; loLbl=nil
+        end
+
+        local function buildLockOnFloatButton()
+            destroyLockOnFloatButton()
+            loGui=Instance.new("ScreenGui")
+            loGui.Name="GojoLockOnFloat"; loGui.ResetOnSpawn=false
+            loGui.DisplayOrder=9997; loGui.IgnoreGuiInset=true
+            loGui.ZIndexBehavior=Enum.ZIndexBehavior.Sibling
+            loGui.Parent=LocalPlayer:WaitForChild("PlayerGui")
+            local vp=Camera and Camera.ViewportSize or Vector2.new(800,600)
+            local lf=Instance.new("Frame")
+            lf.Size=UDim2.fromOffset(64,64)
+            lf.Position=UDim2.fromOffset(math.clamp(vp.X-170,0,vp.X-68),math.clamp(vp.Y-250,0,vp.Y-68))
+            lf.BackgroundColor3=Color3.fromRGB(4,10,22); lf.BorderSizePixel=0
+            lf.Active=true; lf.ZIndex=2; lf.Parent=loGui
+            Instance.new("UICorner",lf).CornerRadius=UDim.new(0.5,0)
+            local stroke=Instance.new("UIStroke")
+            stroke.Color=Color3.fromRGB(30,80,220); stroke.Thickness=2.5
+            stroke.Transparency=0; stroke.ApplyStrokeMode=Enum.ApplyStrokeMode.Border
+            stroke.Parent=lf
+            local lbl=Instance.new("TextLabel")
+            lbl.Size=UDim2.new(1,0,1,0); lbl.BackgroundTransparency=1
+            lbl.Text="LOCK"; lbl.TextColor3=Color3.fromRGB(60,140,255)
+            lbl.TextSize=11; lbl.Font=Enum.Font.GothamBold; lbl.ZIndex=3; lbl.Parent=lf
+            local btn=Instance.new("TextButton")
+            btn.Size=UDim2.new(1,0,1,0); btn.BackgroundTransparency=1
+            btn.Text=""; btn.ZIndex=4; btn.Parent=lf
+            loFloat=lf; loStroke=stroke; loLbl=lbl
+            local loDrg=false; local loTapS=0
+            local loDragOr=Vector2.zero; local loFrOr=Vector2.zero; local loMvd=false
+            btn.InputBegan:Connect(function(inp)
+                if inp.UserInputType==Enum.UserInputType.Touch then
+                    loDrg=true; loMvd=false; loTapS=tick()
+                    loDragOr=Vector2.new(inp.Position.X,inp.Position.Y)
+                    loFrOr=Vector2.new(lf.Position.X.Offset,lf.Position.Y.Offset)
+                end
+            end)
+            UserInputService.InputChanged:Connect(function(inp)
+                if loDrg and inp.UserInputType==Enum.UserInputType.Touch then
+                    local d=Vector2.new(inp.Position.X,inp.Position.Y)-loDragOr
+                    if d.Magnitude>12 then loMvd=true end
+                    if loMvd then  -- drag guard
+                        local vp2=Camera and Camera.ViewportSize or Vector2.new(800,600)
+                        lf.Position=UDim2.fromOffset(math.clamp(loFrOr.X+d.X,0,vp2.X-68),math.clamp(loFrOr.Y+d.Y,0,vp2.Y-68))
+                    end
+                end
+            end)
+            UserInputService.InputEnded:Connect(function(inp)
+                if loDrg and inp.UserInputType==Enum.UserInputType.Touch then
+                    loDrg=false
+                    if not loMvd and (tick()-loTapS)<0.35 then
+                        if St.lockOnEnabled then
+                            disableLockOn()
+                        else
+                            St.lockOnEnabled=true; enableLockOn()
+                        end
+                    end
+                end
+            end)
+            -- Visual sync loop
+            task.spawn(function()
+                while loGui and loGui.Parent do
+                    task.wait(0.25); if not loFloat then break end
+                    if St.lockOnEnabled then
+                        pcall(function()
+                            stroke.Color=Color3.fromRGB(80,200,255); lbl.TextColor3=Color3.fromRGB(80,200,255)
+                            lf.BackgroundColor3=Color3.fromRGB(4,22,44); lbl.Text="ON"
+                        end)
+                    else
+                        pcall(function()
+                            stroke.Color=Color3.fromRGB(30,80,220); lbl.TextColor3=Color3.fromRGB(60,140,255)
+                            lf.BackgroundColor3=Color3.fromRGB(4,10,22); lbl.Text="LOCK"
+                        end)
+                    end
+                end
+            end)
+        end
+        _G.buildLockOnFloatButton   = buildLockOnFloatButton
+        _G.destroyLockOnFloatButton = destroyLockOnFloatButton
     end
 
     do
@@ -3028,11 +3255,18 @@ if mobile then
             else setStatus("Voiding..."); voidResetFallback()
                 task.spawn(function() waitForDeathAndRespawn(); setStatus("Idle") end) end
         end})
-       Tabs.Combat:AddToggle("MobileLockOn",{Title="Lock-On",Default=false,Callback=function(v)
+      Tabs.Combat:AddToggle("MobileLockOn",{Title="Lock-On",Default=false,Callback=function(v)
             St.lockOnToggleOn=v
             St.lockOnEnabled=v
-            if v then enableLockOn(); notify("Lock-On","Enabled.",2)
-            else disableLockOn(); notify("Lock-On","Disabled.",2) end
+            if v then
+                enableLockOn()
+                if _G.buildLockOnFloatButton then _G.buildLockOnFloatButton() end
+                notify("Lock-On","Enabled.",2)
+            else
+                disableLockOn()
+                if _G.destroyLockOnFloatButton then _G.destroyLockOnFloatButton() end
+                notify("Lock-On","Disabled.",2)
+            end
         end})
         Tabs.Combat:AddDropdown("MobileLockOnMethod",{Title="Lock-On Method",Values={"Body","Camera"},Default="Body",
             Callback=function(v) Cfg.LockOn.Method=v end})
@@ -3051,8 +3285,12 @@ if mobile then
         end})
         Tabs.Combat:AddToggle("MobileNoDomainTP",{Title="No Domain TP",Default=false,Callback=function(v) St.noDomainTP=v end})
         Tabs.Combat:AddToggle("MobileIncludeNPCs",{Title="Include NPCs",Default=true,Callback=function(v) Cfg.INCLUDE_NPCS=v end})
-        Tabs.Combat:AddToggle("MobileSweepOverlay",{Title="Sweep Overlay",Default=true,Callback=function(v) St.overlayEnabled=v end})
-      Tabs.Combat:AddToggle("MobileFly",{Title="Fly",Default=false,Callback=function(v)
+        Tabs.Combat:AddToggle("MobileSweepOverlay",{Title="Sweep Overlay",Default=false,Callback=function(v)
+            St.overlayEnabled=v
+            if v then if _G.buildMobileStandaloneOverlay then _G.buildMobileStandaloneOverlay() end
+            else if _G.destroyMobileStandaloneOverlay then _G.destroyMobileStandaloneOverlay() end end
+        end})
+        Tabs.Combat:AddToggle("MobileFly",{Title="Fly",Default=false,Callback=function(v)
             St.flyToggleOn=v
             if v then
                 if _G.buildFlyFloatButton then _G.buildFlyFloatButton() end
@@ -3399,9 +3637,16 @@ if mobile then
         end})
 
         Tabs.Chars:AddParagraph({Title="Yuji",Content="Auto Black Flash"})
-        Tabs.Chars:AddToggle("CharsAutoBF",{Title="Auto Black Flash",Default=false,Callback=function(v)
-            if v then St.bfEnabled=true; bfStartAll(); notify("Auto BF","Enabled.",3)
-            else bfStopAll(); notify("Auto BF","Disabled.",2) end
+       Tabs.Chars:AddToggle("CharsAutoBF",{Title="Auto Black Flash",Default=false,Callback=function(v)
+            if v then
+                St.bfEnabled=true; bfStartAll()
+                if _G.buildBFFloatButton then _G.buildBFFloatButton() end
+                notify("Auto BF","Enabled.",3)
+            else
+                bfStopAll()
+                if _G.destroyBFFloatButton then _G.destroyBFFloatButton() end
+                notify("Auto BF","Disabled.",2)
+            end
         end})
         Tabs.Chars:AddSlider("CharsBFRange",      {Title="BF Detect Range",Min=10,  Max=50, Default=25,  Rounding=0,Callback=function(v) Cfg.BF.Range=v end})
         Tabs.Chars:AddSlider("CharsBFGlide",      {Title="BF Glide Speed", Min=0.05,Max=1.0,Default=0.25,Rounding=2,Callback=function(v) Cfg.BF.Duration=v end})
@@ -3437,77 +3682,92 @@ if mobile then
         Fluent:Notify({Title="Gojo Domain V32",Content="Mobile UI loaded.",Duration=4})
         SaveManager:LoadAutoloadConfig()
 
-        -- BF Float Button
-        local bfFloatGui=Instance.new("ScreenGui")
-        bfFloatGui.Name="GojoBFFloat"; bfFloatGui.ResetOnSpawn=false
-        bfFloatGui.DisplayOrder=9999; bfFloatGui.IgnoreGuiInset=true
-        bfFloatGui.ZIndexBehavior=Enum.ZIndexBehavior.Sibling
-        bfFloatGui.Parent=LocalPlayer:WaitForChild("PlayerGui")
-        local sc=Camera and Camera.ViewportSize or Vector2.new(800,600)
-        local bfFloat=Instance.new("Frame")
-        bfFloat.Size=UDim2.fromOffset(70,70)
-        bfFloat.Position=UDim2.fromOffset(math.clamp(sc.X-90,0,sc.X-74),math.clamp(sc.Y-160,0,sc.Y-74))
-        bfFloat.BackgroundColor3=Color3.fromRGB(8,4,18); bfFloat.BorderSizePixel=0
-        bfFloat.Active=true; bfFloat.ZIndex=2; bfFloat.Parent=bfFloatGui
-        Instance.new("UICorner",bfFloat).CornerRadius=UDim.new(0.5,0)
-        local bfFloatStroke=Instance.new("UIStroke")
-        bfFloatStroke.Color=Color3.fromRGB(60,30,100); bfFloatStroke.Thickness=2.5
-        bfFloatStroke.Transparency=0; bfFloatStroke.ApplyStrokeMode=Enum.ApplyStrokeMode.Border
-        bfFloatStroke.Parent=bfFloat
-        local bfFloatLbl=Instance.new("TextLabel")
-        bfFloatLbl.Size=UDim2.new(1,0,1,0); bfFloatLbl.BackgroundTransparency=1
-        bfFloatLbl.Text="BF"; bfFloatLbl.TextColor3=Color3.fromRGB(120,60,200)
-        bfFloatLbl.TextSize=16; bfFloatLbl.Font=Enum.Font.GothamBold
-        bfFloatLbl.ZIndex=3; bfFloatLbl.Parent=bfFloat
-        local bfFloatBtn=Instance.new("TextButton")
-        bfFloatBtn.Size=UDim2.new(1,0,1,0); bfFloatBtn.BackgroundTransparency=1
-        bfFloatBtn.Text=""; bfFloatBtn.ZIndex=4; bfFloatBtn.Parent=bfFloat
-        local bfDragging=false; local bfTapStart=0
-        local bfDragOrigin=Vector2.zero; local bfFrameOrig=Vector2.zero; local bfMoved=false
-        bfFloatBtn.InputBegan:Connect(function(inp)
-            if inp.UserInputType==Enum.UserInputType.Touch then
-                bfDragging=true; bfMoved=false; bfTapStart=tick()
-                bfDragOrigin=Vector2.new(inp.Position.X,inp.Position.Y)
-                bfFrameOrig=Vector2.new(bfFloat.Position.X.Offset,bfFloat.Position.Y.Offset)
+-- BF Float Button — built/destroyed by the BF toggle
+        do
+            local bfFloatGui=nil
+            local bfFloat=nil; local bfFloatStroke=nil; local bfFloatLbl=nil
+
+            local function destroyBFFloatButton()
+                if bfFloatGui and bfFloatGui.Parent then pcall(function() bfFloatGui:Destroy() end) end
+                bfFloatGui=nil; bfFloat=nil; bfFloatStroke=nil; bfFloatLbl=nil
             end
-        end)
-        UserInputService.InputChanged:Connect(function(inp)
-            if bfDragging and inp.UserInputType==Enum.UserInputType.Touch then
-                local d=Vector2.new(inp.Position.X,inp.Position.Y)-bfDragOrigin
-                if d.Magnitude>8 then bfMoved=true end
-                local vp=Camera and Camera.ViewportSize or Vector2.new(800,600)
-                bfFloat.Position=UDim2.fromOffset(math.clamp(bfFrameOrig.X+d.X,0,vp.X-74),math.clamp(bfFrameOrig.Y+d.Y,0,vp.Y-74))
-            end
-        end)
-        UserInputService.InputEnded:Connect(function(inp)
-            if bfDragging and inp.UserInputType==Enum.UserInputType.Touch then
-                bfDragging=false
-                if not bfMoved and (tick()-bfTapStart)<0.35 then
-                    if St.bfEnabled then
-                        task.spawn(bfTriggerDash)
-                        bfFloatStroke.Color=Color3.fromRGB(255,200,50); bfFloatLbl.TextColor3=Color3.fromRGB(255,200,50)
-                        task.delay(0.2,function()
-                            if St.bfEnabled then bfFloatStroke.Color=Color3.fromRGB(160,80,255); bfFloatLbl.TextColor3=Color3.fromRGB(160,80,255)
-                            else bfFloatStroke.Color=Color3.fromRGB(60,30,100); bfFloatLbl.TextColor3=Color3.fromRGB(120,60,200) end
-                        end)
-                    else notify("Auto BF","Enable Auto BF first.",2) end
-                end
-            end
-        end)
-        task.spawn(function()
-            local lastState=false
-            while true do task.wait(0.25)
-                if St.bfEnabled~=lastState then lastState=St.bfEnabled
-                    if St.bfEnabled then
-                        bfFloatStroke.Color=Color3.fromRGB(160,80,255); bfFloatLbl.TextColor3=Color3.fromRGB(160,80,255)
-                        bfFloat.BackgroundColor3=Color3.fromRGB(14,6,28)
-                    else
-                        bfFloatStroke.Color=Color3.fromRGB(60,30,100); bfFloatLbl.TextColor3=Color3.fromRGB(120,60,200)
-                        bfFloat.BackgroundColor3=Color3.fromRGB(8,4,18)
+
+            local function buildBFFloatButton()
+                destroyBFFloatButton()
+                bfFloatGui=Instance.new("ScreenGui")
+                bfFloatGui.Name="GojoBFFloat"; bfFloatGui.ResetOnSpawn=false
+                bfFloatGui.DisplayOrder=9999; bfFloatGui.IgnoreGuiInset=true
+                bfFloatGui.ZIndexBehavior=Enum.ZIndexBehavior.Sibling
+                bfFloatGui.Parent=LocalPlayer:WaitForChild("PlayerGui")
+                local sc=Camera and Camera.ViewportSize or Vector2.new(800,600)
+                local bf=Instance.new("Frame")
+                bf.Size=UDim2.fromOffset(70,70)
+                bf.Position=UDim2.fromOffset(math.clamp(sc.X-90,0,sc.X-74),math.clamp(sc.Y-160,0,sc.Y-74))
+                bf.BackgroundColor3=Color3.fromRGB(8,4,18); bf.BorderSizePixel=0
+                bf.Active=true; bf.ZIndex=2; bf.Parent=bfFloatGui
+                Instance.new("UICorner",bf).CornerRadius=UDim.new(0.5,0)
+                local stroke=Instance.new("UIStroke")
+                stroke.Color=Color3.fromRGB(160,80,255); stroke.Thickness=2.5
+                stroke.Transparency=0; stroke.ApplyStrokeMode=Enum.ApplyStrokeMode.Border
+                stroke.Parent=bf
+                local lbl=Instance.new("TextLabel")
+                lbl.Size=UDim2.new(1,0,1,0); lbl.BackgroundTransparency=1
+                lbl.Text="BF"; lbl.TextColor3=Color3.fromRGB(160,80,255)
+                lbl.TextSize=16; lbl.Font=Enum.Font.GothamBold; lbl.ZIndex=3; lbl.Parent=bf
+                local btn=Instance.new("TextButton")
+                btn.Size=UDim2.new(1,0,1,0); btn.BackgroundTransparency=1
+                btn.Text=""; btn.ZIndex=4; btn.Parent=bf
+                bfFloat=bf; bfFloatStroke=stroke; bfFloatLbl=lbl
+                local bfDrg=false; local bfTapS=0
+                local bfDragOr=Vector2.zero; local bfFrOr=Vector2.zero; local bfMvd=false
+                btn.InputBegan:Connect(function(inp)
+                    if inp.UserInputType==Enum.UserInputType.Touch then
+                        bfDrg=true; bfMvd=false; bfTapS=tick()
+                        bfDragOr=Vector2.new(inp.Position.X,inp.Position.Y)
+                        bfFrOr=Vector2.new(bf.Position.X.Offset,bf.Position.Y.Offset)
                     end
-                end
+                end)
+                UserInputService.InputChanged:Connect(function(inp)
+                    if bfDrg and inp.UserInputType==Enum.UserInputType.Touch then
+                        local d=Vector2.new(inp.Position.X,inp.Position.Y)-bfDragOr
+                        if d.Magnitude>12 then bfMvd=true end
+                        if bfMvd then  -- drag guard: only move on intentional drag
+                            local vp=Camera and Camera.ViewportSize or Vector2.new(800,600)
+                            bf.Position=UDim2.fromOffset(math.clamp(bfFrOr.X+d.X,0,vp.X-74),math.clamp(bfFrOr.Y+d.Y,0,vp.Y-74))
+                        end
+                    end
+                end)
+                UserInputService.InputEnded:Connect(function(inp)
+                    if bfDrg and inp.UserInputType==Enum.UserInputType.Touch then
+                        bfDrg=false
+                        if not bfMvd and (tick()-bfTapS)<0.35 then
+                            if St.bfEnabled then
+                                task.spawn(bfTriggerDash)
+                                stroke.Color=Color3.fromRGB(255,200,50); lbl.TextColor3=Color3.fromRGB(255,200,50)
+                                task.delay(0.2,function()
+                                    if bfFloatGui and bfFloatGui.Parent then
+                                        if St.bfEnabled then stroke.Color=Color3.fromRGB(160,80,255); lbl.TextColor3=Color3.fromRGB(160,80,255)
+                                        else stroke.Color=Color3.fromRGB(60,30,100); lbl.TextColor3=Color3.fromRGB(120,60,200) end
+                                    end
+                                end)
+                            else notify("Auto BF","Enable Auto BF first.",2) end
+                        end
+                    end
+                end)
+                task.spawn(function()
+                    while bfFloatGui and bfFloatGui.Parent do
+                        task.wait(0.25); if not bfFloat then break end
+                        if St.bfEnabled then
+                            pcall(function() stroke.Color=Color3.fromRGB(160,80,255); lbl.TextColor3=Color3.fromRGB(160,80,255); bf.BackgroundColor3=Color3.fromRGB(14,6,28) end)
+                        else
+                            pcall(function() stroke.Color=Color3.fromRGB(60,30,100); lbl.TextColor3=Color3.fromRGB(120,60,200); bf.BackgroundColor3=Color3.fromRGB(8,4,18) end)
+                        end
+                    end
+                end)
             end
-        end)
+            _G.buildBFFloatButton   = buildBFFloatButton
+            _G.destroyBFFloatButton = destroyBFFloatButton
+        end
     end
 end -- end if mobile
 
